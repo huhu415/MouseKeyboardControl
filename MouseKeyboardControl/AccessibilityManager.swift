@@ -10,8 +10,7 @@ private let AXValueType_CFRange = 4
 @_silgen_name("_AXUIElementGetWindow")
 func _AXUIElementGetWindow(
     _ axElement: AXUIElement, _ windowId: UnsafeMutablePointer<CGWindowID>
-)
-    -> AXError
+)-> AXError
 
 class AccessibilityManager: ObservableObject {
     // 发布属性用于 SwiftUI 绑定
@@ -19,77 +18,124 @@ class AccessibilityManager: ObservableObject {
     @Published var focusedWindowPID: pid_t = 0
     @Published var focusedAppName: String = ""
 
+    // 处理属性值的辅助函数
+    private func processAttributeValue(_ attributeName: String, _ attributeValue: AnyObject?) -> (String, Any)? {
+        guard let attributeValue = attributeValue else { return nil }
+        
+        // 将属性名作为键
+        let key = attributeName
+        
+        // 根据属性值的类型处理
+        switch CFGetTypeID(attributeValue) {
+        case CFStringGetTypeID():
+            // 字符串类型
+            return (key, attributeValue as! String)
+            
+        case CFBooleanGetTypeID():
+            // 布尔类型
+            return (key, CFBooleanGetValue(attributeValue as! CFBoolean))
+            
+        case CFNumberGetTypeID():
+            // 数字类型
+            let number = attributeValue as! CFNumber
+            var value: Int = 0
+            CFNumberGetValue(number, CFNumberType.intType, &value)
+            return (key, value)
+            
+        case AXUIElementGetTypeID():
+            // 辅助功能元素类型 - 返回元素的角色
+            let element = attributeValue as! AXUIElement
+            var roleValue: CFTypeRef?
+            let roleStatus = AXUIElementCopyAttributeValue(element, kAXRoleAttribute as CFString, &roleValue)
+            if roleStatus == .success, let role = roleValue as? String {
+                return (key, ["role": role])
+            }
+            return (key, ["role": "unknown"])
+            
+        case CFArrayGetTypeID():
+            // 数组类型
+            if let array = attributeValue as? [AnyObject], !array.isEmpty {
+                // 检查是否为AXUIElement数组
+                if let firstItem = array.first, CFGetTypeID(firstItem) == AXUIElementGetTypeID() {
+                    // 对于UI元素数组，只返回数量
+                    return (key, ["count": array.count])
+                } else {
+                    // 其他数组尝试转换
+                    var values: [Any] = []
+                    for item in array {
+                        if let stringItem = item as? String {
+                            values.append(stringItem)
+                        } else if let numberItem = item as? NSNumber {
+                            values.append(numberItem)
+                        } else {
+                            values.append(String(describing: item))
+                        }
+                    }
+                    return (key, values)
+                }
+            }
+            return (key, [])
+            
+        case AXValueGetTypeID():
+            // AXValue类型 (CGPoint, CGSize, CGRect等)
+            let axValue = attributeValue as! AXValue
+            let axValueType = AXValueGetType(axValue)
+            
+            switch Int(axValueType.rawValue) {
+            case AXValueType_CGPoint:
+                var point = CGPoint.zero
+                AXValueGetValue(axValue, axValueType, &point)
+                return (key, ["x": point.x, "y": point.y])
+                
+            case AXValueType_CGSize:
+                var size = CGSize.zero
+                AXValueGetValue(axValue, axValueType, &size)
+                return (key, ["width": size.width, "height": size.height])
+                
+            case AXValueType_CGRect:
+                var rect = CGRect.zero
+                AXValueGetValue(axValue, axValueType, &rect)
+                return (key, [
+                    "x": rect.origin.x,
+                    "y": rect.origin.y,
+                    "width": rect.size.width,
+                    "height": rect.size.height
+                ])
+                
+            default:
+                return (key, String(describing: attributeValue))
+            }
+            
+        default:
+            // 其他类型
+            return (key, String(describing: attributeValue))
+        }
+    }
+
     private func dfs(element: AXUIElement) -> [String: Any] {
         var result: [String: Any] = [:]
-
-        // 定义要获取的属性列表
-        let attributes: [(String, String)] = [
-            (kAXRoleAttribute, "role"),
-            (kAXSubroleAttribute, "subrole"),
-            (kAXRoleDescriptionAttribute, "roleDescription"),
-            (kAXTitleAttribute, "title"),
-            (kAXValueAttribute, "value"),
-            (kAXDescriptionAttribute, "description"),
-            (kAXHelpAttribute, "help"),
-            (kAXEnabledAttribute, "enabled"),
-            (kAXFocusedAttribute, "focused"),
-            (kAXPositionAttribute, "position"),
-            (kAXSizeAttribute, "size"),
-            (kAXWindowAttribute, "window"),
-            (kAXSelectedAttribute, "selected"),
-            (kAXExpandedAttribute, "expanded"),
-            (kAXIdentifierAttribute, "identifier"),
-            (kAXURLAttribute, "url"),
-            (kAXIndexAttribute, "index"),
-            (kAXTextAttribute, "text"),
-            (kAXPlaceholderValueAttribute, "placeholder"),
-            (kAXIsEditableAttribute, "isEditable"),
-            (kAXMainAttribute, "isMain"),
-            (kAXMinimizedAttribute, "isMinimized"),
-            (kAXModalAttribute, "isModal"),
-        ]
-
-        // 获取每个属性的值
-        for (attributeName, resultKey) in attributes {
-            var attributeValue: AnyObject?
-            let status = AXUIElementCopyAttributeValue(
-                element,
-                attributeName as CFString,
-                &attributeValue
-            )
-
-            if status == .success {
-                switch attributeValue {
-                case let value as String:
-                    result[resultKey] = value
-                case let value as Bool:
-                    result[resultKey] = value
-                case let value as Int:
-                    result[resultKey] = value
-                case let value as CGPoint:
-                    result[resultKey] = ["x": value.x, "y": value.y]
-                case let value as CGSize:
-                    result[resultKey] = [
-                        "width": value.width, "height": value.height,
-                    ]
-                case let value as NSValue:
-                    if String(describing: value).contains("NSPoint") {
-                        let point = value.pointValue
-                        result[resultKey] = ["x": point.x, "y": point.y]
-                    } else if String(describing: value).contains("NSSize") {
-                        let size = value.sizeValue
-                        result[resultKey] = [
-                            "width": size.width, "height": size.height,
-                        ]
-                    }
-                default:
-                    if let stringValue = attributeValue as? String {
-                        result[resultKey] = stringValue
+        
+        // 获取元素支持的所有属性
+        var attributeNamesRef: CFArray?
+        let status = AXUIElementCopyAttributeNames(element, &attributeNamesRef)
+        
+        if status == .success, let attributeNames = attributeNamesRef as? [String] {
+            for attributeName in attributeNames {
+                var attributeValue: AnyObject?
+                let valueStatus = AXUIElementCopyAttributeValue(
+                    element,
+                    attributeName as CFString,
+                    &attributeValue
+                )
+                
+                if valueStatus == .success {
+                    if let (key, value) = processAttributeValue(attributeName, attributeValue) {
+                        result[key] = value
                     }
                 }
             }
         }
-
+        
         // 处理子元素
         var children: AnyObject?
         AXUIElementCopyAttributeValue(
